@@ -133,7 +133,7 @@ def true_function(x):
 
 # Create evaluation points in the interval [0, 2π]
 x_eval = jnp.linspace(0, 2*jnp.pi, 100)
-y_true = true_function(x_eval) + np.random.normal(0, 0.01, size=x_eval.shape)  # Match function_matching_example noise level
+y_true = true_function(x_eval) + np.random.normal(0, 0.1, size=x_eval.shape)  # Match function_matching_example noise level
 
 print(f"\nTarget function: y = x * sin(x) + 0.5x")
 print(f"Evaluating functions over interval [0, 2π] with {len(x_eval)} points")
@@ -184,10 +184,10 @@ for i, func_string in enumerate(all_functions):
             # Try different starting points for robust optimization
             num_params = len(param_symbols)
             starting_points = [
-                np.ones(num_params),           # Start at 1.0
-                np.zeros(num_params),          # Start at 0.0
-                np.full(num_params, 0.5),      # Start at 0.5
-                np.full(num_params, -0.5),     # Start at -0.5
+                # np.ones(num_params),           # Start at 1.0
+                # np.zeros(num_params),          # Start at 0.0
+                # np.full(num_params, 0.5),      # Start at 0.5
+                # np.full(num_params, -0.5),     # Start at -0.5
                 np.random.uniform(-2, 2, num_params),  # Random start 1
                 np.random.uniform(-1, 1, num_params),  # Random start 2
             ]
@@ -301,10 +301,11 @@ print(f"Function value at x=1: {jitted_best_func(x_test):.6f}")
 print(f"Gradient at x=1: {grad_func_scalar(x_test):.6f}")
 
 # Vectorized evaluation with JIT
-x_plot = jnp.linspace(0, 2*jnp.pi, 200)
-y_true_plot = true_function(x_plot)
+x_plot = x_eval #jnp.linspace(0, 2*jnp.pi, 200)
+y_true_plot = y_true #true_function(x_plot)
 y_best_plot = jitted_best_func(x_plot)
 gradients = grad_func(x_plot)
+true_gradients = vmap(grad(true_function))(x_plot)
 
 # 7. Plot the results
 plt.figure(figsize=(15, 10))
@@ -333,7 +334,8 @@ plt.xlim(0, 2*jnp.pi)
 
 # Gradient plot
 plt.subplot(3, 1, 3)
-plt.plot(x_plot, gradients, 'm-', linewidth=1.5, label='Gradient (computed with JAX)')
+plt.plot(x_plot, gradients, 'm-', linewidth=1.5, label='Gradient of ESR function (computed with JAX)')
+plt.plot(x_plot, true_gradients, 'c--', linewidth=1.5, label='True Gradient')
 plt.xlabel('x')
 plt.ylabel("f'(x)")
 plt.title('Gradient of Best ESR Function (computed with JAX autodiff)')
