@@ -15,6 +15,15 @@ from typing import Callable
 # Set random seed for reproducible comparison
 np.random.seed(42)
 random.seed(42)
+    # JAX imports
+import jax
+import jax.numpy as jnp
+from jax import jit, grad, vmap
+from typing import Callable
+
+# Set random seed for reproducible comparison
+np.random.seed(42)
+random.seed(42)
 
 def sympy_to_jax(expr: sympy.Expr, variables: list) -> Callable:
     """
@@ -27,50 +36,32 @@ def sympy_to_jax(expr: sympy.Expr, variables: list) -> Callable:
     Returns:
         JAX function that can be jitted and differentiated
     """
-    # Convert SymPy expression to JAX using sympy.lambdify with 'jax' modules
+    # Check for problematic expressions first
+    expr_str = str(expr)
+    if 'ComplexInfinity' in expr_str or 'zoo' in expr_str or 'nan' in expr_str:
+        raise ValueError(f"Expression contains problematic terms: {expr_str}")
+    
     try:
-        # Create a lambdify function that uses JAX functions
+        # Convert SymPy expression to JAX using sympy.lambdify with 'jax' modules
         jax_func = sympy.lambdify(variables, expr, modules=[
             {'sin': jnp.sin, 'cos': jnp.cos, 'exp': jnp.exp, 'log': jnp.log,
              'Abs': jnp.abs, 'pow': jnp.power, 'inv': lambda x: 1/x}, 
             'jax'
         ])
+        
+        # Test the function with a simple input to ensure it works
+        test_input = jnp.array(1.0)
+        test_result = jax_func(test_input)
+        
+        # Check for invalid results
+        if jnp.isnan(test_result) or jnp.isinf(test_result):
+            raise ValueError("Function produces invalid results")
+            
         return jax_func
+        
     except Exception as e:
-        print(f"Error converting to JAX: {e}")
-        # Fallback to string parsing approach if lambdify fails
-        return create_jax_from_string(str(expr), variables)
-
-def create_jax_from_string(expr_str: str, variables: list) -> Callable:
-    """
-    Fallback method to create JAX function from string representation.
-    This handles cases where lambdify might fail.
-    """
-    # Replace common mathematical functions with JAX equivalents
-    replacements = {
-        'sin': 'jnp.sin',
-        'cos': 'jnp.cos', 
-        'exp': 'jnp.exp',
-        'log': 'jnp.log',
-        'Abs': 'jnp.abs',
-        'inv': 'lambda x: 1/x'
-    }
-    
-    jax_expr_str = expr_str
-    for old, new in replacements.items():
-        jax_expr_str = jax_expr_str.replace(old, new)
-    
-    # Create the function string
-    var_names = [str(var) for var in variables]
-    func_str = f"lambda {', '.join(var_names)}: {jax_expr_str}"
-    
-    try:
-        # Create local namespace with JAX functions
-        local_ns = {'jnp': jnp}
-        return eval(func_str, {"__builtins__": {}}, local_ns)
-    except:
-        # If all else fails, return a simple identity function
-        return lambda x: x
+        # If JAX conversion fails, raise an error to skip this function
+        raise ValueError(f"Error converting to JAX: {e}")
 
 def create_jax_objective_function(expr_template, param_symbols, x_vals, y_target):
     """Create a JAX-based objective function for parameter optimization with scipy"""
@@ -82,6 +73,11 @@ def create_jax_objective_function(expr_template, param_symbols, x_vals, y_target
             
             # Substitute parameters into expression  
             expr_with_params = expr_template.subs(substitutions)
+            
+            # Check for problematic expressions before conversion
+            expr_str = str(expr_with_params)
+            if 'ComplexInfinity' in expr_str or 'zoo' in expr_str or 'nan' in expr_str:
+                return 1e10  # Large penalty for problematic expressions
             
             # Convert to JAX function
             jax_func = sympy_to_jax(expr_with_params, [sympy.Symbol('x')])
@@ -137,7 +133,7 @@ def true_function(x):
 
 # Create evaluation points in the interval [0, 2π]
 x_eval = jnp.linspace(0, 2*jnp.pi, 100)
-y_true = true_function(x_eval) + np.random.normal(0, 0.05, size=x_eval.shape)
+y_true = true_function(x_eval) + np.random.normal(0, 0.01, size=x_eval.shape)  # Match function_matching_example noise level
 
 print(f"\nTarget function: y = x * sin(x) + 0.5x")
 print(f"Evaluating functions over interval [0, 2π] with {len(x_eval)} points")
@@ -152,14 +148,12 @@ valid_functions = 0
 errors = []
 function_results = []
 
-print(f"\nEvaluating {len(all_functions)} functions with JAX optimization...")
+print(f"\nEvaluating {len(all_functions)} functions with JAX and scipy optimization...")
 
 # Use all functions for fair comparison with function_matching_example
-sample_functions = all_functions
-
-for i, func_string in enumerate(sample_functions):
-    if (i + 1) % 100 == 0:
-        print(f"Processed {i + 1}/{len(sample_functions)} functions...")
+for i, func_string in enumerate(all_functions):
+    if (i + 1) % 25 == 0:
+        print(f"Processed {i + 1}/{len(all_functions)} functions...")
     
     try:
         # Convert string to sympy expression
@@ -176,49 +170,109 @@ for i, func_string in enumerate(sample_functions):
         param_symbols = [sym for sym in expr_template.free_symbols if str(sym).startswith('a')]
         
         if param_symbols:
-            # Use JAX for optimization
-            initial_params = jnp.ones(len(param_symbols))
+            # Optimize parameters using scipy with JAX-based objective and multiple restarts
+            # Create JAX-based objective function
+            objective = create_jax_objective_function(expr_template, param_symbols, x_eval, y_true)
             
-            # For JAX optimization, we'll use a simple approach since the objective is complex
-            # In practice, you might want to use JAX-based optimizers like Optax
-            substitutions = {param: 1.0 for param in param_symbols}
-            final_expr = expr_template.subs(substitutions)
+            # Optimize parameters with bounds to prevent extreme values
+            bounds = [(-10, 10) for _ in param_symbols]  # Same bounds as function_matching_example
             
-        else:
-            final_expr = expr_template
+            # Multiple restart optimization to avoid local minima
+            best_result = None
+            best_mse = float('inf')
             
-        # Convert to JAX function
-        jax_func = sympy_to_jax(final_expr, [x])
-        
-        # Test the function
-        try:
-            y_pred = jax_func(x_eval)
+            # Try different starting points for robust optimization
+            num_params = len(param_symbols)
+            starting_points = [
+                np.ones(num_params),           # Start at 1.0
+                np.zeros(num_params),          # Start at 0.0
+                np.full(num_params, 0.5),      # Start at 0.5
+                np.full(num_params, -0.5),     # Start at -0.5
+                np.random.uniform(-2, 2, num_params),  # Random start 1
+                np.random.uniform(-1, 1, num_params),  # Random start 2
+            ]
             
-            # Check for invalid values
-            if jnp.any(jnp.isinf(y_pred)) or jnp.any(jnp.isnan(y_pred)):
+            try:
+                for start_point in starting_points:
+                    try:
+                        result = minimize(objective, start_point, bounds=bounds, method='L-BFGS-B', 
+                                        options={'maxfun': 200})  # Reduced maxfun per restart
+                        
+                        if result.success and result.fun < best_mse:
+                            best_result = result
+                            best_mse = result.fun
+                            
+                    except:
+                        continue
+                
+                # Also try gradient-free method as backup
+                try:
+                    result_nm = minimize(objective, np.ones(num_params), method='Nelder-Mead', 
+                                       options={'maxfev': 200})
+                    
+                    if result_nm.success and result_nm.fun < best_mse:
+                        best_result = result_nm
+                        best_mse = result_nm.fun
+                        
+                except:
+                    pass
+                
+                if best_result and best_result.success:
+                    # Use best optimized parameters
+                    optimized_params = best_result.x
+                    mse = best_result.fun
+                    
+                    # Create final expression with optimized parameters
+                    substitutions = {param: optimized_params[j] for j, param in enumerate(param_symbols)}
+                    final_expr = expr_template.subs(substitutions)
+                    final_jax_func = sympy_to_jax(final_expr, [x])
+                    
+                else:
+                    # All optimization attempts failed, skip this function
+                    continue
+                    
+            except Exception as e:
+                # Optimization failed, skip this function
                 continue
                 
-            mse = float(jnp.mean((y_pred - y_true) ** 2))
+        else:
+            # No parameters to optimize
+            final_expr = expr_template
+            final_jax_func = sympy_to_jax(final_expr, [x])
             
-            errors.append(mse)
-            function_results.append((mse, func_string, final_expr))
-            
-            if mse < best_error:
-                best_error = mse
-                best_function = func_string
-                best_jax_func = jax_func
-                best_expr = final_expr
+            try:
+                y_pred = final_jax_func(x_eval)
                 
-            valid_functions += 1
+                # Check for invalid values
+                if jnp.any(jnp.isinf(y_pred)) or jnp.any(jnp.isnan(y_pred)):
+                    continue
+                    
+                mse = float(jnp.mean((y_pred - y_true) ** 2))
+                
+            except Exception as e:
+                continue
+        
+        # Record results
+        errors.append(mse)
+        function_results.append((mse, func_string, final_expr))
+        
+        if mse < best_error:
+            best_error = mse
+            best_function = func_string
+            best_jax_func = final_jax_func
+            best_expr = final_expr
+            if param_symbols:
+                best_params = optimized_params
+            else:
+                best_params = None
             
-        except Exception as e:
-            continue
+        valid_functions += 1
             
     except Exception as e:
         continue
 
 print(f"\nEvaluation complete!")
-print(f"Successfully evaluated {valid_functions} out of {len(sample_functions)} functions")
+print(f"Successfully evaluated {valid_functions} out of {len(all_functions)} functions")
 
 if best_function is None:
     print("No valid function found that could be evaluated.")

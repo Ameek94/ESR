@@ -49,3 +49,4 @@ fitting/
 coverage.xml
 .coverage
 data.txt
+*.png
